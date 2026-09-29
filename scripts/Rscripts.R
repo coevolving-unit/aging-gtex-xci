@@ -1,5 +1,3 @@
-setwd("~/Library/CloudStorage/OneDrive-NationalInstitutesofHealth/COEVOLviNG/XCI_escape_aging")
-
 library(biomaRt)
 library(data.table)
 library(dplyr)
@@ -182,6 +180,38 @@ d[, pl2 := fcase(
   external_gene_name %in% silenced_either,    "silenced",
   default = "other"
 )]
+
+#### end ####
+
+#### 3.1 Supp Table 1: gene consensus categories ####
+
+supp_table1 <- merged %>%
+  dplyr::select(
+    external_gene_name,
+    balaton_category            = Balaton.consensus.calls,
+    tukiainen_category          = `Reported XCI status`,
+    tukiainen_possible_new_call = `Possible new call for escape (support from several analyses)`,
+    tukiainen_combined_status   = combined_status
+  ) %>%
+  mutate(
+    escape_both      = external_gene_name %in% escape_both,
+    escape_either    = external_gene_name %in% escape_either,
+    silenced_both    = external_gene_name %in% silenced_both,
+    silenced_either  = external_gene_name %in% silenced_either,
+    variable_both    = external_gene_name %in% variable_both,
+    variable_either  = external_gene_name %in% variable_either,
+    PAR              = external_gene_name %in% par_genes
+  ) %>%
+  filter(external_gene_name %in% unique(d$external_gene_name)) %>%
+  distinct(external_gene_name, .keep_all = TRUE) %>%
+  arrange(external_gene_name)
+
+# sanity checks
+nrow(supp_table1)
+colSums(supp_table1[, c("escape_both","escape_either","silenced_both",
+                        "silenced_either","variable_both","variable_either","PAR")])
+
+write.csv(supp_table1, "SuppTable1_gene_consensus_categories.csv", row.names = FALSE)
 
 #### end ####
 
@@ -1025,6 +1055,8 @@ varpart_df_all$predictor <- factor(varpart_df_all$predictor, levels = ordered_pr
 base_pal <- as.character(paletteer::paletteer_d("MetBrewer::Archambault"))
 pal <- colorRampPalette(base_pal)(length(ordered_predictors))
 names(pal) <- ordered_predictors
+varpart_df_all$samples <- "all_samples"
+write.csv(varpart_df_all, "varpart_rerults_all.csv")
 
 outliers <- varpart_df_all %>%
   group_by(predictor) %>%
@@ -1095,6 +1127,11 @@ varpart_df_m3$predictor <- factor(varpart_df_m3$predictor, levels = ordered_pred
 base_pal <- as.character(paletteer::paletteer_d("MetBrewer::Archambault"))
 pal <- colorRampPalette(base_pal)(length(ordered_predictors))
 names(pal) <- ordered_predictors
+varpart_df_m3$samples <- "high_skew"
+write.csv(varpart_df_m3, "varpart_results_m3.csv")
+
+varpart_combined <- rbind(varpart_df_all, varpart_df_m3)
+write.csv(varpart_combined, "varpart_results_combined.csv")
 
 outliers <- varpart_df_m3 %>%
   group_by(predictor) %>%
@@ -1152,6 +1189,92 @@ varpart_m3 <- ggplot(varpart_df_m3, aes(x = predictor, y = variance_fraction, fi
   )
 ggsave("varpart_m3.pdf", varpart_m3, height = 7, width = 12)
 
+#### end ####
+
+#### 7.1 dominant predictor among variable genes ####
+
+# Variable genes = genes that show both escape states in m3
+pat <- m3 %>%
+  group_by(external_gene_name, currentescape) %>%
+  summarise(n = n(), .groups = "drop")
+
+variable_genes <- pat %>%
+  group_by(external_gene_name) %>%
+  summarise(
+    n_states = n_distinct(currentescape),
+    .groups = "drop"
+  ) %>%
+  filter(n_states == 2)
+
+# Predictor groups
+biological <- c("tissue", "participant", "age")
+technical  <- c("AE_center", "AE_IQR", "totalCount")
+
+# previous consensus annotation for variable genes
+vg <- variable_genes$external_gene_name
+
+classify_prior3 <- function(g) {
+  s <- g %in% silenced_either
+  e <- g %in% escape_either
+  v <- g %in% variable_either
+  if (v & s)     return("variable+silenced")
+  if (v & e)     return("variable+escaping")
+  if (v)         return("variable_only")
+  if (s & e)     return("silenced+escaping_discordant")
+  if (s)         return("silenced_only")
+  if (e)         return("escaping_only")
+  return("unannotated")
+}
+
+prior_class <- tibble(external_gene_name = variable_genes$external_gene_name) %>%
+  mutate(prior = vapply(external_gene_name, classify_prior3, character(1)))
+
+# Check number of variable genes
+prior_class %>% count(prior)
+prior_class %>% nrow()
+
+
+# Dominant biological predictor for each variable gene
+dominant <- varpart_df %>%
+  filter(external_gene_name %in% variable_genes$external_gene_name,
+         predictor %in% biological) %>%
+  group_by(external_gene_name) %>%
+  slice_max(variance_fraction, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  rename(dominant_predictor = predictor,
+         dominant_fraction  = variance_fraction)
+
+# Total technical variance for each variable gene
+technical_load <- varpart_df %>%
+  filter(predictor %in% technical) %>%
+  group_by(external_gene_name) %>%
+  summarise(technical_fraction = sum(variance_fraction), .groups = "drop")
+
+# Combine dominant biological predictor + technical fraction
+result <- dominant %>%
+  left_join(
+    technical_load,
+    by = "external_gene_name"
+  ) %>%
+  left_join(
+    prior_class,
+    by = "external_gene_name"
+  )
+
+# Summaries
+result <- dominant %>%
+  left_join(technical_load, by = "external_gene_name")
+result %>% count(dominant_predictor)
+
+
+# Mean variance fraction attributable to the
+# dominant biological predictor
+result %>%
+  group_by(dominant_predictor) %>%
+  summarise(n = n(), mean_frac = mean(dominant_fraction), .groups = "drop")
+View(result)
+
+write.csv(result, "dominant_predictor_variable_genes_m3.csv", row.names = FALSE)
 #### end ####
 
 #### 8. linear modelling ####
@@ -1377,7 +1500,8 @@ ggsave("32models_m3_by_shape.pdf", m3_p, height = 10, width = 6.5)
 #### 9. consistency ####
 
 # ── 1. Summarise each analysis per gene ──────────────────────────────────────
-
+install.packages("ggupset")
+library(ggupset)
 # Analysis 1: among best-AIC models, proportion with sig positive age effect
 a1 <- as.data.table(results)[best_aic == TRUE,
                              .(prop_sig_pos = mean(estimate > 0 & p.value < 0.05, na.rm = TRUE),
@@ -1454,7 +1578,7 @@ consistency_df <- Reduce(
 )
 consistency_df %>%
   dplyr::select(external_gene_name, a1_direction, a1_direction_all, a2_direction, a3_direction, a4_direction) %>%
-  write_csv("analysis_consistency.csv")
+  write.csv("analysis_consistency_m3only.csv")
 
 
 # ── 3. Count genes showing more/less escape with age ─────────────────────────
@@ -1523,7 +1647,7 @@ upset_p <- ggplot(upset_dt_sub, aes(x = analyses)) +
   scale_y_continuous(limits = c(0, 20)) +
   labs(x = NULL, y = "Number of genes") +
   theme_bw(base_size = 10)
-ggsave("upset_plot_4groups.pdf", upset_p, height = 4, width = 11)
+ggsave("upset_plot_4groups_m3only.pdf", upset_p, height = 4, width = 11)
 
 #### end ####
 
@@ -1681,7 +1805,7 @@ panel_union <- (
     subtitle = "Filled = p < 0.05 | Dashed = significance threshold | Dotted = PAR1 boundary",
     theme    = theme(plot.title = element_text(size = 12, face = "bold"))
   )
-ggsave("pos_enrichment.pdf", panel_union, height = 6, width = 4.5)
+ggsave("pos_enrichment_Sept26.pdf", panel_union, height = 6, width = 4.5)
 
 #### end ####
 
@@ -1790,7 +1914,7 @@ fig4_b <- ggplot(gp_plot, aes(
                            title.position = "top", direction = "horizontal",
                            reverse = TRUE)
   )
-ggsave("functional_enrichment_gSCS_0.1_new.pdf", fig4_b, width = 14, height = 4)
+ggsave("functional_enrichment_gSCS_0.1_Sept26.pdf", fig4_b, width = 14, height = 4)
 #### End ####
 
 #### 13 position on X chromosome ####
@@ -1836,7 +1960,7 @@ status_colors <- c(
   "escape" = "#ff69b4"
 )
 
-marker_colors <- dir_colors[genes_123$direction]
+marker_colors <- dir_colors[genes_export$direction]
 
 #  ── 3. GRanges objects ────────────────────────────────────────
 genes_gr <- regioneR::toGRanges(data.frame(
@@ -1863,7 +1987,7 @@ consensus_escape <- subset(consensus, status == "escape" & !is.na(start_position
   mutate(midpoint = (start_position + end_position) / 2)
 
 # ── 4. Plot ───────────────────────────────────────────────────
-pdf("gene_positions_X.pdf", width = 20, height = 6)
+pdf("gene_positions_X_Sept26.pdf", width = 20, height = 6)
 
 kp <- plotKaryotype(
   genome      = "hg38",
